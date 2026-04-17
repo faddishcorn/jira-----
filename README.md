@@ -98,3 +98,4 @@ python .\jira_daily_report.py --date 2026-04-17 --jql 'project = ABC AND statusC
 - 기본 timezone은 `Asia/Seoul`
 - `--spaces`는 이전 호환용 별칭이고 현재는 `--projects`와 동일하게 동작
 - `--dev-projects`, `--planning-projects`는 예전 팀 분류용 옵션이라 지금은 선택사항
+- codex를 통해 생성됨
