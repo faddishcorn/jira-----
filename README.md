@@ -16,7 +16,7 @@
 ## 설치
 
 ```powershell
-cd "C:\Users\MoongTangE\Desktop\jira보고서생성"
+cd path\to\jira-report-project
 python -m pip install -r .\requirements-jira-report.txt
 ```
 
