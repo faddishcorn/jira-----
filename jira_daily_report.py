@@ -376,7 +376,7 @@ def classify_team(project_key: str, dev_projects: set[str], planning_projects: s
         return "Development"
     if project_key in planning_projects:
         return "Planning"
-    return "Unassigned"
+    return "미분류"
 
 
 def normalize_issue(
@@ -401,14 +401,14 @@ def normalize_issue(
 
     return IssueRecord(
         key=raw.get("key", "UNKNOWN"),
-        summary=(fields.get("summary") or "(no summary)").strip(),
+        summary=(fields.get("summary") or "(제목 없음)").strip(),
         team=classify_team(project_key, dev_projects, planning_projects),
         project_key=project_key,
         issue_type=issue_type.get("name", "Unknown"),
         status_name=status.get("name", "Unknown"),
         status_category_key=status_category.get("key", "unknown"),
-        assignee=assignee.get("displayName") or "Unassigned",
-        reporter=reporter.get("displayName") or "Unknown",
+        assignee=assignee.get("displayName") or "미배정",
+        reporter=reporter.get("displayName") or "알 수 없음",
         labels=[str(label) for label in labels],
         components=[item.get("name", "") for item in components if item.get("name")],
         created=parse_jira_datetime(fields.get("created")),
@@ -431,7 +431,7 @@ def extract_today_worklogs(raw_worklogs: Iterable[dict[str, Any]], *, start: dat
             continue
         items.append(
             WorklogEntry(
-                author=(raw.get("author") or {}).get("displayName", "Unknown"),
+                author=(raw.get("author") or {}).get("displayName", "알 수 없음"),
                 started=started_local,
                 time_spent_seconds=int(raw.get("timeSpentSeconds") or 0),
                 comment=html_to_text(raw.get("comment")),
@@ -458,6 +458,21 @@ def fmt_local(value: datetime | None, timezone_name: str) -> str | None:
     return value.astimezone(ZoneInfo(timezone_name)).strftime("%Y-%m-%d %H:%M %Z")
 
 
+def issue_activity_time(issue: IssueRecord) -> datetime:
+    return issue.updated or issue.created or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def priority_rank(issue: IssueRecord) -> int:
+    priority_rank_map = {
+        "Highest": 0,
+        "High": 1,
+        "Medium": 2,
+        "Low": 3,
+        "Lowest": 4,
+    }
+    return priority_rank_map.get(issue.priority, 5)
+
+
 def build_issue_detail_lines(
     issue: IssueRecord,
     *,
@@ -468,65 +483,186 @@ def build_issue_detail_lines(
     lines = [f"- **{issue.key}** - {issue.summary}"]
     meta_bits = [
         issue.project_key,
-        f"type={issue.issue_type}",
-        f"status={issue.status_name}",
-        f"priority={issue.priority}",
+        f"유형={issue.issue_type}",
+        f"상태={issue.status_name}",
+        f"우선순위={issue.priority}",
     ]
     if issue.components:
-        meta_bits.append(f"components={', '.join(issue.components)}")
+        meta_bits.append(f"컴포넌트={', '.join(issue.components)}")
     if issue.labels:
-        meta_bits.append(f"labels={', '.join(issue.labels)}")
+        meta_bits.append(f"라벨={', '.join(issue.labels)}")
     lines.append(f"  - {' / '.join(meta_bits)}")
-    lines.append(f"  - assignee={issue.assignee} / reporter={issue.reporter}")
+    lines.append(f"  - 담당자={issue.assignee} / 보고자={issue.reporter}")
 
     if issue.start_date:
-        lines.append(f"  - start date: {issue.start_date.isoformat()}")
+        lines.append(f"  - 시작일: {issue.start_date.isoformat()}")
 
     created_text = fmt_local(issue.created, timezone_name)
     updated_text = fmt_local(issue.updated, timezone_name)
     resolved_text = fmt_local(issue.resolutiondate, timezone_name)
     if created_text:
-        lines.append(f"  - created: {created_text}")
+        lines.append(f"  - 생성: {created_text}")
     if updated_text:
-        lines.append(f"  - updated: {updated_text}")
+        lines.append(f"  - 수정: {updated_text}")
     if resolved_text:
-        lines.append(f"  - resolved: {resolved_text}")
+        lines.append(f"  - 완료: {resolved_text}")
 
-    lines.append(f"  - link: {issue.url}")
+    lines.append(f"  - 링크: {issue.url}")
 
     if include_worklogs and person_worklogs:
         worklog_seconds = sum(item.time_spent_seconds for item in person_worklogs)
-        lines.append(f"  - work logged: {seconds_to_human(worklog_seconds)}")
+        lines.append(f"  - 작업 기록: {seconds_to_human(worklog_seconds)}")
         for worklog in person_worklogs:
             comment = f" / {worklog.comment}" if worklog.comment else ""
             started_text = worklog.started.astimezone(ZoneInfo(timezone_name)).strftime("%H:%M")
             lines.append(f"    - {started_text} / {seconds_to_human(worklog.time_spent_seconds)}{comment}")
     elif include_worklogs and issue.worklogs_today:
-        lines.append(f"  - total worklogs today: {seconds_to_human(issue.total_worklog_seconds_today)}")
+        lines.append(f"  - 오늘 작업 기록 합계: {seconds_to_human(issue.total_worklog_seconds_today)}")
 
     return lines
 
 
 def build_action_hint(issue: IssueRecord) -> str:
     if issue.is_in_progress:
-        return "continue"
+        return "계속 진행"
     if issue.status_category_key in TODO_STATUS_KEYS:
-        return "pick up"
-    return "check"
+        return "착수 필요"
+    return "확인 필요"
 
 
 def action_rank(issue: IssueRecord) -> tuple[int, int, datetime]:
     status_rank = 0 if issue.is_in_progress else 1 if issue.status_category_key in TODO_STATUS_KEYS else 2
-    priority_rank_map = {
-        "Highest": 0,
-        "High": 1,
-        "Medium": 2,
-        "Low": 3,
-        "Lowest": 4,
-    }
-    priority_rank = priority_rank_map.get(issue.priority, 5)
-    recency = issue.updated or issue.created or datetime.min.replace(tzinfo=timezone.utc)
-    return (status_rank, priority_rank, recency)
+    recency = issue_activity_time(issue)
+    return (status_rank, priority_rank(issue), recency)
+
+
+def build_executive_summary_lines(
+    *,
+    target_day: date,
+    timezone_name: str,
+    issues: list[IssueRecord],
+    include_worklogs: bool,
+) -> list[str]:
+    lines = ["## 전체 요약", ""]
+    if not issues:
+        lines.extend(["- 선택한 날짜 기준으로 Jira 활동이나 시작 예정 항목이 확인되지 않았습니다.", ""])
+        return lines
+
+    done_items = sorted((issue for issue in issues if issue.is_done), key=issue_activity_time, reverse=True)
+    in_progress_items = sorted(
+        (issue for issue in issues if issue.is_in_progress),
+        key=lambda issue: (priority_rank(issue), -issue_activity_time(issue).timestamp()),
+    )
+    open_items = [issue for issue in issues if not issue.is_done]
+    scheduled_today = sorted(
+        (issue for issue in open_items if issue.start_date == target_day),
+        key=lambda issue: (priority_rank(issue), issue.project_key, issue.key),
+    )
+    stale_in_progress = sorted(
+        (
+            issue
+            for issue in in_progress_items
+            if issue.updated and issue.updated.date() <= target_day - timedelta(days=2)
+        ),
+        key=lambda issue: (priority_rank(issue), issue.updated or datetime.min.replace(tzinfo=timezone.utc)),
+    )
+    should_have_started = sorted(
+        (
+            issue
+            for issue in open_items
+            if issue.start_date and issue.start_date < target_day and not issue.is_in_progress
+        ),
+        key=lambda issue: (priority_rank(issue), issue.start_date or date.min, issue.project_key, issue.key),
+    )
+
+    total_worklog_seconds = sum(issue.total_worklog_seconds_today for issue in issues)
+    overall_bits = [
+        f"총 {len(issues)}건 추적",
+        f"완료 {len(done_items)}건",
+        f"진행중 {len(in_progress_items)}건",
+        f"미완료 {len(open_items) - len(in_progress_items)}건",
+    ]
+    if include_worklogs and total_worklog_seconds:
+        overall_bits.append(f"작업 기록 {seconds_to_human(total_worklog_seconds)}")
+    lines.append(f"- 전체 현황: {', '.join(overall_bits)}.")
+    top_projects = Counter(issue.project_key for issue in issues).most_common(5)
+    if top_projects:
+        project_summary = ", ".join(f"{project} ({count})" for project, count in top_projects)
+        lines.append(f"- 활동이 많았던 프로젝트: {project_summary}")
+    top_statuses = Counter(issue.status_name for issue in issues).most_common(5)
+    if top_statuses:
+        status_summary = ", ".join(f"{status} ({count})" for status, count in top_statuses)
+        lines.append(f"- 상태 분포 요약: {status_summary}")
+    if include_worklogs and total_worklog_seconds:
+        top_workers = Counter()
+        for issue in issues:
+            for worklog in issue.worklogs_today:
+                top_workers[worklog.author] += worklog.time_spent_seconds
+        worker_summary = ", ".join(
+            f"{person} ({seconds_to_human(seconds)})"
+            for person, seconds in top_workers.most_common(5)
+        )
+        if worker_summary:
+            lines.append(f"- 작업 기록 상위 기여자: {worker_summary}")
+    lines.append("")
+
+    lines.append("### 주요 진척")
+    if done_items:
+        for issue in done_items[:3]:
+            resolved_text = fmt_local(issue.resolutiondate or issue.updated, timezone_name)
+            suffix = f" / 완료 시각 {resolved_text}" if resolved_text else ""
+            lines.append(f"- **{issue.key}** - {issue.summary}{suffix}")
+    else:
+        lines.append("- 선택한 날짜에 완료로 잡힌 항목은 없습니다.")
+    lines.append("")
+
+    lines.append("### 당일 시작 예정")
+    if scheduled_today:
+        for issue in scheduled_today[:5]:
+            lines.append(
+                f"- **{issue.key}** - {issue.summary} / {issue.project_key} / "
+                f"{issue.status_name} / 우선순위={issue.priority}"
+            )
+    else:
+        lines.append("- 해당 날짜에 시작일이 지정된 미완료 항목은 없습니다.")
+    lines.append("")
+
+    lines.append("### 리스크 및 확인 필요")
+    attention_items = stale_in_progress[:3] + [
+        item for item in should_have_started[:3] if item not in stale_in_progress[:3]
+    ]
+    if attention_items:
+        for issue in attention_items[:5]:
+            reason_bits: list[str] = []
+            if issue.is_in_progress and issue.updated:
+                reason_bits.append(f"{issue.updated.date().isoformat()} 이후 업데이트 없음")
+            if issue.start_date and issue.start_date < target_day and not issue.is_in_progress:
+                reason_bits.append(f"시작일 경과 ({issue.start_date.isoformat()})")
+            reason_text = f" / {'; '.join(reason_bits)}" if reason_bits else ""
+            lines.append(
+                f"- **{issue.key}** - {issue.summary} / {issue.status_name} / 우선순위={issue.priority}{reason_text}"
+            )
+    else:
+        lines.append("- 현재 데이터 기준으로 뚜렷한 지연 또는 시작일 경과 항목은 보이지 않습니다.")
+    lines.append("")
+
+    lines.append("### 담당자별 최우선 확인 항목")
+    owner_focus: dict[str, list[IssueRecord]] = defaultdict(list)
+    for issue in open_items:
+        owner_focus[issue.assignee or "미배정"].append(issue)
+    owner_order = sorted(
+        owner_focus.keys(),
+        key=lambda person: (-len(owner_focus[person]), person),
+    )
+    for person in owner_order[:5]:
+        ranked_items = sorted(owner_focus[person], key=action_rank)
+        top_issue = ranked_items[0]
+        lines.append(
+            f"- {person}: 미완료 {len(ranked_items)}건 / 최우선 **{top_issue.key}** "
+            f"({build_action_hint(top_issue)}, {top_issue.priority})"
+        )
+    lines.append("")
+    return lines
 
 
 def build_report_markdown(
@@ -545,7 +681,7 @@ def build_report_markdown(
         if worklog.author
     }
     if not contributor_names:
-        contributor_names = {issue.assignee for issue in issues if issue.assignee != "Unassigned"}
+        contributor_names = {issue.assignee for issue in issues if issue.assignee != "미배정"}
     total_people = len(contributor_names)
     done_count = sum(1 for issue in issues if issue.is_done)
     in_progress_count = sum(1 for issue in issues if issue.is_in_progress)
@@ -554,48 +690,35 @@ def build_report_markdown(
     total_worklog_seconds = sum(issue.total_worklog_seconds_today for issue in issues)
 
     lines: list[str] = [
-        f"# Jira Daily Activity Report - {target_day.isoformat()}",
+        f"# Jira 일일 활동 보고서 - {target_day.isoformat()}",
         "",
-        f"- Timezone: `{timezone_name}`",
-        f"- Total touched issues: **{total_issues}**",
-        f"- Distinct contributors: **{total_people}**",
+        # f"- 타임존: `{timezone_name}`",
+        f"- 집계된 이슈 수: **{total_issues}**",
+        f"- 기여자 수: **{total_people}**",
         (
-            f"- Done: **{done_count}** / In progress: **{in_progress_count}** / "
-            f"To do: **{todo_count}** / Other: **{unknown_count}**"
+            f"- 완료: **{done_count}** / 진행중: **{in_progress_count}** / "
+            f"대기: **{todo_count}** / 기타: **{unknown_count}**"
         ),
     ]
     if include_worklogs:
-        lines.append(f"- Logged time on the day: **{seconds_to_human(total_worklog_seconds)}**")
+        lines.append(f"- 당일 작업 기록 시간: **{seconds_to_human(total_worklog_seconds)}**")
 
-    lines.extend(["", "## Query used", "", "```jql", jql, "```", ""])
-
-    if not issues:
-        lines.extend(["## Summary", "", "No matching Jira activity was found on the selected date."])
-        return "\n".join(lines) + "\n"
-
-    lines.extend(["## Overall summary", ""])
-    top_projects = Counter(issue.project_key for issue in issues).most_common(5)
-    if top_projects:
-        project_summary = ", ".join(f"{project} ({count})" for project, count in top_projects)
-        lines.append(f"- Most active projects: {project_summary}")
-    top_statuses = Counter(issue.status_name for issue in issues).most_common(5)
-    if top_statuses:
-        status_summary = ", ".join(f"{status} ({count})" for status, count in top_statuses)
-        lines.append(f"- Status distribution highlights: {status_summary}")
-    if include_worklogs and total_worklog_seconds:
-        top_workers = Counter()
-        for issue in issues:
-            for worklog in issue.worklogs_today:
-                top_workers[worklog.author] += worklog.time_spent_seconds
-        worker_summary = ", ".join(
-            f"{person} ({seconds_to_human(seconds)})"
-            for person, seconds in top_workers.most_common(5)
-        )
-        if worker_summary:
-            lines.append(f"- Top logged contributors: {worker_summary}")
     lines.append("")
 
-    lines.extend(["## All activity items", ""])
+    if not issues:
+        lines.extend(["## 요약", "", "선택한 날짜에 해당하는 Jira 활동이 없습니다."])
+        return "\n".join(lines) + "\n"
+
+    lines.extend(
+        build_executive_summary_lines(
+            target_day=target_day,
+            timezone_name=timezone_name,
+            issues=issues,
+            include_worklogs=include_worklogs,
+        )
+    )
+
+    lines.extend(["## 전체 활동 항목", ""])
     all_items = sorted(
         issues,
         key=lambda issue: (
@@ -614,13 +737,13 @@ def build_report_markdown(
         if include_worklogs and issue.worklogs_today:
             by_author: dict[str, list[WorklogEntry]] = defaultdict(list)
             for worklog in issue.worklogs_today:
-                by_author[worklog.author or "Unknown"].append(worklog)
+                by_author[worklog.author or "알 수 없음"].append(worklog)
             for author, author_worklogs in by_author.items():
                 person_entries[author].append((issue, sorted(author_worklogs, key=lambda item: item.started)))
         else:
-            person_entries[issue.assignee or "Unassigned"].append((issue, []))
+            person_entries[issue.assignee or "미배정"].append((issue, []))
 
-    lines.extend(["## Activity by person", ""])
+    lines.extend(["## 담당자별 활동", ""])
     for person in sorted(person_entries.keys()):
         entries = sorted(
             person_entries[person],
@@ -636,10 +759,10 @@ def build_report_markdown(
         lines.extend([f"### {person}", ""])
         if include_worklogs:
             lines.append(
-                f"- Related issues: **{touched_issue_count}** / Logged time: **{seconds_to_human(person_work_seconds)}**"
+                f"- 관련 이슈: **{touched_issue_count}** / 작업 기록 시간: **{seconds_to_human(person_work_seconds)}**"
             )
         else:
-            lines.append(f"- Related issues: **{touched_issue_count}**")
+            lines.append(f"- 관련 이슈: **{touched_issue_count}**")
         lines.append("")
         for issue, person_worklogs in entries:
             lines.extend(
@@ -653,36 +776,36 @@ def build_report_markdown(
             lines.append("")
 
     actionable_issues = [issue for issue in issues if not issue.is_done]
-    lines.extend(["## Today's suggested next items by assignee", ""])
+    lines.extend(["## 담당자별 오늘 확인할 항목", ""])
     if not actionable_issues:
-        lines.extend(["- No open items found from the selected date's activity.", ""])
+        lines.extend(["- 선택한 날짜의 활동 기준으로 추가 확인이 필요한 미완료 항목이 없습니다.", ""])
     else:
         actionable_by_person: dict[str, list[IssueRecord]] = defaultdict(list)
         for issue in actionable_issues:
-            actionable_by_person[issue.assignee or "Unassigned"].append(issue)
+            actionable_by_person[issue.assignee or "미배정"].append(issue)
 
         for person in sorted(actionable_by_person.keys()):
             person_items = sorted(actionable_by_person[person], key=action_rank)
-            lines.extend([f"### {person}", "", f"- Open items to look at today: **{len(person_items)}**", ""])
+            lines.extend([f"### {person}", "", f"- 오늘 확인할 미완료 항목: **{len(person_items)}**", ""])
             for issue in person_items:
                 lines.append(
                     f"- **{issue.key}** - {build_action_hint(issue)} / "
-                    f"{issue.summary} [{issue.status_name}] / priority={issue.priority}"
+                    f"{issue.summary} [{issue.status_name}] / 우선순위={issue.priority}"
                 )
-                lines.append(f"  - {issue.project_key} / type={issue.issue_type} / reporter={issue.reporter}")
+                lines.append(f"  - {issue.project_key} / 유형={issue.issue_type} / 보고자={issue.reporter}")
                 if issue.start_date:
-                    lines.append(f"  - start date: {issue.start_date.isoformat()}")
+                    lines.append(f"  - 시작일: {issue.start_date.isoformat()}")
                 updated_text = fmt_local(issue.updated, timezone_name)
                 created_text = fmt_local(issue.created, timezone_name)
                 if updated_text:
-                    lines.append(f"  - latest activity: {updated_text}")
+                    lines.append(f"  - 최근 활동: {updated_text}")
                 elif created_text:
-                    lines.append(f"  - created: {created_text}")
+                    lines.append(f"  - 생성: {created_text}")
                 if issue.components:
-                    lines.append(f"  - components: {', '.join(issue.components)}")
+                    lines.append(f"  - 컴포넌트: {', '.join(issue.components)}")
                 if issue.labels:
-                    lines.append(f"  - labels: {', '.join(issue.labels)}")
-                lines.append(f"  - link: {issue.url}")
+                    lines.append(f"  - 라벨: {', '.join(issue.labels)}")
+                lines.append(f"  - 링크: {issue.url}")
             lines.append("")
 
     completed = [issue for issue in issues if issue.is_done]
@@ -692,16 +815,16 @@ def build_report_markdown(
     def add_issue_section(title: str, items: list[IssueRecord]) -> None:
         lines.extend([f"## {title}", ""])
         if not items:
-            lines.extend(["- None", ""])
+            lines.extend(["- 없음", ""])
             return
         for issue in items:
             suffix = f" ({issue.assignee})" if issue.assignee else ""
             lines.append(f"- **{issue.key}** - {issue.summary} [{issue.status_name}] - {issue.project_key}{suffix}")
         lines.append("")
 
-    add_issue_section("Done items", completed)
-    add_issue_section("In-progress items", in_progress)
-    add_issue_section("To-do or waiting items", backlogish)
+    add_issue_section("완료 항목", completed)
+    add_issue_section("진행중 항목", in_progress)
+    add_issue_section("대기 또는 예정 항목", backlogish)
     return "\n".join(lines).rstrip() + "\n"
 
 
